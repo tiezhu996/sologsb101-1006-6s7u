@@ -6,6 +6,7 @@
 import { computed, type Component } from 'vue'
 import {
   CircleCheckFilled,
+  CircleClose,
   CircleCloseFilled,
   DataLine,
   Files,
@@ -54,6 +55,7 @@ const iconMap: Record<string, Component> = {
   TrendCharts,
   WarningFilled,
   CircleCloseFilled,
+  CircleClose,
   CircleCheckFilled
 }
 

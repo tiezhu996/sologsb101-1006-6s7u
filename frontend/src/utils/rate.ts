@@ -4,6 +4,7 @@
  */
 import type { AdviceLevel } from '@/types/advice'
 import type { Survey, SurveyPoint } from '@/types/survey'
+import { isSurveyVoided } from '@/types/survey'
 
 /** 预警阈值：月均速率 ≥ 0.10 mm/月 记预警（较重及以上） */
 export const RATE_WARNING = 0.1
@@ -39,6 +40,17 @@ export function levelFromRate(rate: number): AdviceLevel {
   return '一般'
 }
 
+/**
+ * 历史整治建议是否与最新有效分级不一致：措施与状态保留不改，仅标记待复核。
+ * 作废/恢复使最新有效速率分级变化后，建议等级对不上即视为待复核。
+ */
+export function isAdviceStale(
+  advice: { level: AdviceLevel } | null | undefined,
+  level: AdviceLevel | null | undefined
+): boolean {
+  return !!advice && !!level && advice.level !== level
+}
+
 /** 速率对应的 Element Plus 语义色 */
 export function rateTone(rate: number): 'success' | 'warning' | 'danger' {
   const level = levelFromRate(rate)
@@ -72,24 +84,62 @@ export const LEVEL_WEIGHT: Record<AdviceLevel, number> = {
   严重: 30
 }
 
-/** 把某条裂缝的全部测次整理成折线取点（按测次升序） */
-export function buildSurveyPoints(surveys: Survey[]): SurveyPoint[] {
-  const sorted = [...surveys].sort((a, b) => a.seq - b.seq)
+/**
+ * 把某条裂缝的测次整理成折线取点（按日期、其次按测次升序）。
+ * - 默认只纳入有效测次：作废读数不参与台账宽度、变化量、速率与预警；
+ * - includeVoided=true 时保留作废点（作废点变化量/速率按上一有效测次参考计算并标记 voided），
+ *   用于「测次明细」展示作废原值与作废原因。
+ */
+export function buildSurveyPoints(surveys: Survey[], includeVoided = false): SurveyPoint[] {
+  const sorted = [...surveys].sort((a, b) =>
+    a.date === b.date ? a.seq - b.seq : a.date.localeCompare(b.date)
+  )
   const points: SurveyPoint[] = []
-  sorted.forEach((survey, index) => {
-    const previous = index === 0 ? null : sorted[index - 1]
-    const rawDelta = previous ? survey.widthMm - previous.widthMm : 0
-    const days = previous ? daysBetween(previous.date, survey.date) : 1
-    points.push({
-      seq: survey.seq,
-      date: survey.date,
-      widthMm: survey.widthMm,
-      lengthMm: survey.lengthMm,
-      deltaWidthMm: round(previous ? rawDelta : survey.deltaWidthMm, 2),
-      rate: previous ? monthlyRate(rawDelta, days) : 0
-    })
+  let previous: Survey | null = null
+  sorted.forEach((survey) => {
+    const voided = isSurveyVoided(survey)
+    if (!includeVoided && voided) return
+    if (!voided) {
+      const rawDelta = previous ? survey.widthMm - previous.widthMm : 0
+      const days = previous ? daysBetween(previous.date, survey.date) : 1
+      points.push({
+        id: survey.id,
+        seq: survey.seq,
+        date: survey.date,
+        widthMm: survey.widthMm,
+        lengthMm: survey.lengthMm,
+        surveyor: survey.surveyor,
+        deltaWidthMm: round(previous ? rawDelta : survey.deltaWidthMm, 2),
+        rate: previous ? monthlyRate(rawDelta, days) : 0,
+        voided: false
+      })
+      previous = survey
+    } else {
+      // 作废点仅作展示：保留原值，参考变化量/速率按上一有效测次计算
+      const rawDelta = previous ? survey.widthMm - previous.widthMm : 0
+      const days = previous ? daysBetween(previous.date, survey.date) : 1
+      points.push({
+        id: survey.id,
+        seq: survey.seq,
+        date: survey.date,
+        widthMm: survey.widthMm,
+        lengthMm: survey.lengthMm,
+        surveyor: survey.surveyor,
+        deltaWidthMm: round(previous ? rawDelta : survey.deltaWidthMm, 2),
+        rate: previous ? monthlyRate(rawDelta, days) : 0,
+        voided: true,
+        voidReason: survey.voidReason ?? ''
+      })
+    }
   })
   return points
+}
+
+/** 按日期（其次按测次）排序的全部测次 */
+export function sortSurveysByDate(surveys: Survey[]): Survey[] {
+  return [...surveys].sort((a, b) =>
+    a.date === b.date ? a.seq - b.seq : a.date.localeCompare(b.date)
+  )
 }
 
 /** 最新测次的月均速率 */

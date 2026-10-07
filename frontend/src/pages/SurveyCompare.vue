@@ -6,7 +6,7 @@
  */
 import { computed, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
-import { Delete, Edit, Plus } from '@element-plus/icons-vue'
+import { CircleClose, Delete, Edit, Plus, RefreshLeft } from '@element-plus/icons-vue'
 import EmptyPanel from '@/components/common/EmptyPanel.vue'
 import FilterBar from '@/components/common/FilterBar.vue'
 import LevelTag from '@/components/common/LevelTag.vue'
@@ -129,7 +129,7 @@ function openCreate(): void {
 
 function openEdit(surveyId: string): void {
   const survey = trend.surveys.value.find((item) => item.id === surveyId)
-  if (!survey) return
+  if (!survey || survey.voided === true) return
   editingId = surveyId
   dialogTitle.value = `编辑测次 · 第 ${survey.seq} 测次`
   Object.assign(form, {
@@ -168,8 +168,59 @@ async function removeSurvey(surveyId: string, seq: number): Promise<void> {
   ElMessage.success('测次已删除')
 }
 
+/* ---------------------------- 作废 / 恢复 ---------------------------- */
+
+const voidDialogVisible = ref(false)
+const voidFormRef = ref<FormInstance>()
+const voidForm = reactive<{ surveyId: string; reason: string }>({ surveyId: '', reason: '' })
+const voidRules: FormRules = {
+  reason: [{ required: true, message: '作废必须填写原因', trigger: 'blur' }]
+}
+const voidingSurvey = computed(() =>
+  voidForm.surveyId ? trend.surveys.value.find((item) => item.id === voidForm.surveyId) ?? null : null
+)
+
+function isInitial(surveyId: string): boolean {
+  return trend.initialSurveyId.value === surveyId
+}
+
+function openVoid(surveyId: string): void {
+  if (isInitial(surveyId)) {
+    ElMessage.warning('初测读数是复测链基准，不能作废；如确有错误请编辑初测读数。')
+    return
+  }
+  voidForm.surveyId = surveyId
+  voidForm.reason = ''
+  voidDialogVisible.value = true
+}
+
+async function submitVoid(): Promise<void> {
+  const instance = voidFormRef.value
+  if (!instance) return
+  const valid = await instance.validate().catch(() => false)
+  if (!valid) return
+  await surveyStore.voidSurvey(voidForm.surveyId, voidForm.reason)
+  ElMessage.success('读数已作废，原读数已保留；台账宽度、变化量与预警改按最新有效测次计算')
+  voidDialogVisible.value = false
+}
+
+async function restoreSurvey(surveyId: string, seq: number): Promise<void> {
+  const confirmed = await ElMessageBox.confirm(
+    `确认恢复第 ${seq} 测次？恢复后该读数按日期重新纳入变化量与速率计算。`,
+    '恢复确认',
+    { type: 'info', confirmButtonText: '确认恢复', cancelButtonText: '取消' }
+  ).catch(() => false)
+  if (!confirmed) return
+  await surveyStore.restoreSurvey(surveyId)
+  ElMessage.success('读数已恢复并按日期重新纳入计算')
+}
+
 function selectCrack(crackId: string): void {
   surveyStore.setActiveCrack(crackId)
+}
+
+function surveyRowClass({ row }: { row: { voided?: boolean } }): string {
+  return row.voided ? 'row-voided' : ''
 }
 </script>
 
@@ -188,8 +239,9 @@ function selectCrack(crackId: string): void {
     </div>
 
     <div class="stat-row">
-      <StatBadge label="测次总数" :value="surveyStore.surveys.length" suffix="次" icon="DataLine" tone="primary" />
-      <StatBadge label="已复测裂缝" :value="surveyStore.rates.length" suffix="条" icon="Files" tone="info" />
+      <StatBadge label="有效测次" :value="surveyStore.surveys.length - surveyStore.totalVoidedCount" suffix="次" icon="DataLine" tone="primary" />
+      <StatBadge label="作废读数" :value="surveyStore.totalVoidedCount" suffix="次" icon="CircleClose" tone="default" />
+      <StatBadge label="已复测裂缝" :value="surveyStore.measuredCrackCount" suffix="条" icon="Files" tone="info" />
       <StatBadge label="预警裂缝" :value="surveyStore.warningCrackIds.length" suffix="条" icon="WarningFilled" tone="danger" />
       <StatBadge
         label="最高月均速率"
@@ -233,7 +285,8 @@ function selectCrack(crackId: string): void {
           </div>
           <div class="section-card__meta">
             <span>{{ item.crack.position }} / {{ item.crack.direction }}</span>
-            <span>· 测次 {{ item.surveyCount }}</span>
+            <span>· 有效测次 {{ item.surveyCount }}</span>
+            <span v-if="item.voidedCount > 0" style="color: #95a0b0">· 作废 {{ item.voidedCount }}</span>
             <span>· {{ item.rate.toFixed(3) }} mm/月</span>
           </div>
         </div>
@@ -255,10 +308,19 @@ function selectCrack(crackId: string): void {
           </div>
 
           <div v-if="!chart" class="empty-panel is-compact">
-            <p class="empty-panel__desc">该裂缝还没有复测记录，点击「追加测次」录入第一条读数。</p>
+            <p class="empty-panel__desc">该裂缝还没有有效复测记录，点击「追加测次」录入第一条读数。</p>
           </div>
 
-          <div v-else class="chart-wrap">
+          <el-alert
+            v-if="trend.voidedCount.value > 0"
+            type="warning"
+            :closable="false"
+            show-icon
+            style="margin: 8px 0"
+            :title="`有 ${trend.voidedCount.value} 条作废读数：原值保留但不参与计算，台账宽度、变化量与预警均按最新有效测次取值；恢复后按日期重新纳入。`"
+          />
+
+          <div v-if="chart" class="chart-wrap">
             <svg :viewBox="`0 0 ${chart.width} ${chart.height}`" width="100%" height="250" role="img">
               <line
                 :x1="chart.padLeft - 12"
@@ -294,32 +356,88 @@ function selectCrack(crackId: string): void {
             </svg>
           </div>
 
-          <h4 class="panel-subtitle">测次明细</h4>
-          <el-table :data="trend.surveys.value" border stripe size="small">
-            <el-table-column prop="seq" label="测次" width="70" />
-            <el-table-column prop="date" label="复测日期" width="120" />
-            <el-table-column label="宽度(mm)" width="110">
-              <template #default="{ row }">{{ row.widthMm.toFixed(2) }}</template>
-            </el-table-column>
-            <el-table-column label="长度(mm)" width="100">
-              <template #default="{ row }">{{ row.lengthMm }}</template>
-            </el-table-column>
-            <el-table-column label="变化量(mm)" width="120">
+          <h4 class="panel-subtitle">
+            测次明细
+            <span class="muted" style="font-weight: 400">
+              （有效 {{ trend.validSurveys.value.length }} 次<span v-if="trend.voidedCount.value > 0"> · 作废 {{ trend.voidedCount.value }} 次</span>）
+            </span>
+          </h4>
+          <el-table :data="trend.allPoints.value" border stripe size="small" :row-class-name="surveyRowClass">
+            <el-table-column prop="seq" label="测次" width="64" />
+            <el-table-column prop="date" label="复测日期" width="112" />
+            <el-table-column label="宽度(mm)" width="98">
               <template #default="{ row }">
-                <span :style="{ color: row.deltaWidthMm > 0 ? '#c0392b' : '#5b6b82' }">
+                <span :class="{ 'is-voided': row.voided }">{{ row.widthMm.toFixed(2) }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="长度(mm)" width="88">
+              <template #default="{ row }">
+                <span :class="{ 'is-voided': row.voided }">{{ row.lengthMm }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="变化量(mm)" width="108">
+              <template #default="{ row }">
+                <span v-if="row.voided" class="is-voided">—</span>
+                <span v-else :style="{ color: row.deltaWidthMm > 0 ? '#c0392b' : '#5b6b82' }">
                   {{ row.deltaWidthMm > 0 ? '+' : '' }}{{ row.deltaWidthMm.toFixed(2) }}
                 </span>
               </template>
             </el-table-column>
-            <el-table-column prop="surveyor" label="复测人" width="100" />
-            <el-table-column label="操作" width="140">
+            <el-table-column label="月均速率" width="104">
               <template #default="{ row }">
-                <el-button size="small" text type="primary" @click="openEdit(row.id)">
-                  <el-icon><Edit /></el-icon>
-                </el-button>
-                <el-button size="small" text type="danger" @click="removeSurvey(row.id, row.seq)">
-                  <el-icon><Delete /></el-icon>
-                </el-button>
+                <span v-if="row.voided" class="is-voided">—</span>
+                <span v-else>{{ row.rate.toFixed(3) }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column prop="surveyor" label="复测人" width="88">
+              <template #default="{ row }">{{ row.surveyor }}</template>
+            </el-table-column>
+            <el-table-column label="状态" width="92">
+              <template #default="{ row }">
+                <el-tag v-if="row.voided" size="small" type="info" effect="plain">已作废</el-tag>
+                <el-tag v-else size="small" type="success" effect="plain">有效</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="作废原因" min-width="140" show-overflow-tooltip>
+              <template #default="{ row }">
+                <span v-if="row.voided" class="void-reason">{{ row.voidReason || '—' }}</span>
+                <span v-else class="muted">—</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="190" fixed="right">
+              <template #default="{ row }">
+                <template v-if="row.voided">
+                  <el-tooltip content="恢复后按日期重新纳入有效链计算" placement="top">
+                    <el-button size="small" text type="success" @click="restoreSurvey(row.id, row.seq)">
+                      <el-icon><RefreshLeft /></el-icon> 恢复
+                    </el-button>
+                  </el-tooltip>
+                </template>
+                <template v-else>
+                  <el-button size="small" text type="primary" @click="openEdit(row.id)">
+                    <el-icon><Edit /></el-icon>
+                  </el-button>
+                  <el-tooltip
+                    :disabled="!isInitial(row.id)"
+                    content="初测读数是复测链基准，不能作废"
+                    placement="top"
+                  >
+                    <span>
+                      <el-button
+                        size="small"
+                        text
+                        type="warning"
+                        :disabled="isInitial(row.id)"
+                        @click="openVoid(row.id)"
+                      >
+                        <el-icon><CircleClose /></el-icon> 作废
+                      </el-button>
+                    </span>
+                  </el-tooltip>
+                  <el-button size="small" text type="danger" @click="removeSurvey(row.id, row.seq)">
+                    <el-icon><Delete /></el-icon>
+                  </el-button>
+                </template>
               </template>
             </el-table-column>
           </el-table>
@@ -352,12 +470,41 @@ function selectCrack(crackId: string): void {
           v-if="trend.latest.value"
           type="info"
           :closable="false"
-          :title="`上一测次宽度 ${trend.latest.value.widthMm.toFixed(2)} mm（${trend.latest.value.date}），保存后自动换算变化量与月均速率。`"
+          :title="`上一有效测次宽度 ${trend.latest.value.widthMm.toFixed(2)} mm（${trend.latest.value.date}），保存后自动换算变化量与月均速率。`"
         />
       </el-form>
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
         <el-button type="primary" @click="submit">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="voidDialogVisible" title="作废复测读数" width="480px">
+      <el-form ref="voidFormRef" :model="voidForm" :rules="voidRules" label-width="96px">
+        <el-form-item label="测次">
+          <el-input
+            :model-value="voidingSurvey ? `第 ${voidingSurvey.seq} 测次 · ${voidingSurvey.date} · ${voidingSurvey.widthMm.toFixed(2)} mm` : ''"
+            disabled
+          />
+        </el-form-item>
+        <el-form-item label="作废原因" prop="reason">
+          <el-input
+            v-model="voidForm.reason"
+            type="textarea"
+            :rows="3"
+            placeholder="如：复测后核对发现读数录错（必填）"
+          />
+        </el-form-item>
+        <el-alert
+          type="warning"
+          :closable="false"
+          show-icon
+          title="作废后原读数完整保留，但不再参与台账宽度、变化量、速率与预警；可随时恢复，恢复后按日期重新纳入计算。初测读数不能作废。"
+        />
+      </el-form>
+      <template #footer>
+        <el-button @click="voidDialogVisible = false">取消</el-button>
+        <el-button type="warning" @click="submitVoid">确认作废</el-button>
       </template>
     </el-dialog>
   </div>
@@ -386,5 +533,19 @@ function selectCrack(crackId: string): void {
 
 svg text {
   font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif;
+}
+
+.is-voided {
+  color: #95a0b0;
+  text-decoration: line-through;
+}
+
+.void-reason {
+  color: #8a6d3b;
+}
+
+:deep(.row-voided) {
+  background: #f5f6f8 !important;
+  color: #95a0b0;
 }
 </style>

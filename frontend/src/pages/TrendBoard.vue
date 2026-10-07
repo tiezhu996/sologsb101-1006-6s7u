@@ -25,7 +25,7 @@ import {
   type Advice,
   type AdviceDraft
 } from '@/types/advice'
-import { basisText, RATE_SEVERE, RATE_WARNING, round } from '@/utils/rate'
+import { basisText, isAdviceStale, RATE_SEVERE, RATE_WARNING, round } from '@/utils/rate'
 import type { CrackDirection, CrackPosition } from '@/types/crack'
 
 type FilterModel = { keyword: string; [key: string]: string | string[] | boolean }
@@ -80,6 +80,15 @@ const averageRate = computed(() => {
   if (rated.length === 0) return 0
   return round(rated.reduce((sum, item) => sum + item.rate, 0) / rated.length, 3)
 })
+
+/** 全库作废读数总数（作废不计入分级与预警） */
+const totalVoided = computed(() => surveyStore.totalVoidedCount)
+
+/** 历史建议等级与最新有效分级不一致 → 待复核（措施/状态保留不改） */
+function staleOf(crackId: string): boolean {
+  const summary = surveyStore.summaryOf(crackId)
+  return isAdviceStale(adviceOf(crackId), summary ? summary.level : null)
+}
 
 /* --------------------------- 建议生成 --------------------------- */
 
@@ -190,6 +199,10 @@ function sortByRate(a: CrackEnriched, b: CrackEnriched): number {
 function onOnlyWarningChange(value: string | number | boolean): void {
   crackStore.setOnlyWarning(value === true)
 }
+
+function drawerRowClass({ row }: { row: { voided?: boolean } }): string {
+  return row.voided ? 'row-voided' : ''
+}
 </script>
 
 <template>
@@ -215,6 +228,7 @@ function onOnlyWarningChange(value: string | number | boolean): void {
       <StatBadge label="裂缝总数" :value="crackStore.cracks.length" suffix="条" icon="Files" tone="primary" />
       <StatBadge label="预警裂缝" :value="warningRows.length" suffix="条" icon="WarningFilled" tone="warning" />
       <StatBadge label="严重裂缝" :value="severeRows.length" suffix="条" icon="CircleCloseFilled" tone="danger" />
+      <StatBadge label="作废读数" :value="totalVoided" suffix="次" icon="CircleClose" tone="default" />
       <StatBadge label="平均月均速率" :value="averageRate.toFixed(3)" suffix="mm/月" icon="TrendCharts" tone="info" />
     </div>
 
@@ -283,11 +297,20 @@ function onOnlyWarningChange(value: string | number | boolean): void {
             <LevelTag :level="row.level" :rate="row.surveyCount > 1 ? row.rate : undefined" size="small" />
           </template>
         </el-table-column>
-        <el-table-column label="建议" width="120">
+        <el-table-column label="建议" width="150">
           <template #default="{ row }">
-            <el-tag v-if="adviceOf(row.crack.id)" size="small" effect="plain" type="success">
-              {{ adviceOf(row.crack.id)?.state }}
-            </el-tag>
+            <template v-if="adviceOf(row.crack.id)">
+              <el-tag size="small" effect="plain" type="success">
+                {{ adviceOf(row.crack.id)?.state }}
+              </el-tag>
+              <el-tooltip
+                v-if="staleOf(row.crack.id)"
+                content="历史建议等级与最新有效分级不一致，措施与状态保留，请人工复核"
+                placement="top"
+              >
+                <el-tag size="small" type="danger" effect="dark" style="margin-left: 4px">待复核</el-tag>
+              </el-tooltip>
+            </template>
             <span v-else class="muted">未生成</span>
           </template>
         </el-table-column>
@@ -365,28 +388,69 @@ function onOnlyWarningChange(value: string | number | boolean): void {
           <el-descriptions-item label="台账状态">{{ drawerCrack.crack.state }}</el-descriptions-item>
           <el-descriptions-item label="累计变化">{{ drawerTrend.delta.value.toFixed(2) }} mm</el-descriptions-item>
           <el-descriptions-item label="月均速率">{{ drawerTrend.rate.value.toFixed(3) }} mm/月</el-descriptions-item>
+          <el-descriptions-item label="有效 / 作废测次">
+            {{ drawerTrend.validSurveys.value.length }} / {{ drawerTrend.voidedCount.value }}
+          </el-descriptions-item>
         </el-descriptions>
+
+        <el-alert
+          v-if="drawerAdvice && isAdviceStale(drawerAdvice, drawerCrack.level)"
+          type="error"
+          show-icon
+          :closable="false"
+          style="margin-top: 10px"
+          :title="`建议等级「${drawerAdvice.level}」与最新有效分级「${drawerCrack.level}」不一致，已标记待复核；原措施「${drawerAdvice.measure}」与状态「${drawerAdvice.state}」保留。`"
+        />
 
         <div style="margin: 14px 0">
           <LevelTag :level="drawerTrend.level.value" :rate="drawerTrend.rate.value" size="large" />
           <span v-if="drawerAdvice" class="muted" style="margin-left: 10px">
             建议：{{ drawerAdvice.measure }} · {{ drawerAdvice.state }}
+            <el-tag
+              v-if="isAdviceStale(drawerAdvice, drawerCrack.level)"
+              size="small"
+              type="danger"
+              effect="dark"
+              style="margin-left: 6px"
+            >
+              待复核
+            </el-tag>
           </span>
           <span v-else class="muted" style="margin-left: 10px">尚未生成整治建议</span>
         </div>
 
-        <h4 class="panel-subtitle">测次序列</h4>
-        <el-table :data="drawerTrend.points.value" border stripe size="small">
-          <el-table-column prop="seq" label="测次" width="70" />
-          <el-table-column prop="date" label="日期" width="120" />
-          <el-table-column label="宽度(mm)" width="110">
-            <template #default="{ row }">{{ row.widthMm.toFixed(2) }}</template>
+        <h4 class="panel-subtitle">测次序列（作废读数不参与分级）</h4>
+        <el-table :data="drawerTrend.allPoints.value" border stripe size="small" :row-class-name="drawerRowClass">
+          <el-table-column prop="seq" label="测次" width="64" />
+          <el-table-column prop="date" label="日期" width="112" />
+          <el-table-column label="宽度(mm)" width="100">
+            <template #default="{ row }">
+              <span :class="{ 'is-voided': row.voided }">{{ row.widthMm.toFixed(2) }}</span>
+            </template>
           </el-table-column>
-          <el-table-column label="变化量(mm)" width="120">
-            <template #default="{ row }">{{ row.deltaWidthMm.toFixed(2) }}</template>
+          <el-table-column label="变化量(mm)" width="104">
+            <template #default="{ row }">
+              <span v-if="row.voided" class="is-voided">—</span>
+              <span v-else>{{ row.deltaWidthMm.toFixed(2) }}</span>
+            </template>
           </el-table-column>
-          <el-table-column label="月均速率" width="120">
-            <template #default="{ row }">{{ row.rate.toFixed(3) }}</template>
+          <el-table-column label="月均速率" width="104">
+            <template #default="{ row }">
+              <span v-if="row.voided" class="is-voided">—</span>
+              <span v-else>{{ row.rate.toFixed(3) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="状态" width="88">
+            <template #default="{ row }">
+              <el-tag v-if="row.voided" size="small" type="info" effect="plain">已作废</el-tag>
+              <el-tag v-else size="small" type="success" effect="plain">有效</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="作废原因" min-width="120" show-overflow-tooltip>
+            <template #default="{ row }">
+              <span v-if="row.voided">{{ row.voidReason || '—' }}</span>
+              <span v-else class="muted">—</span>
+            </template>
           </el-table-column>
         </el-table>
 
@@ -420,5 +484,15 @@ function onOnlyWarningChange(value: string | number | boolean): void {
   justify-content: space-between;
   gap: 8px;
   margin-bottom: 12px;
+}
+
+.is-voided {
+  color: #95a0b0;
+  text-decoration: line-through;
+}
+
+:deep(.row-voided) {
+  background: #f5f6f8 !important;
+  color: #95a0b0;
 }
 </style>

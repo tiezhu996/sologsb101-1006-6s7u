@@ -8,7 +8,7 @@ import type { Crack, CrackState } from '@/types/crack'
 import type { Survey } from '@/types/survey'
 import type { Advice } from '@/types/advice'
 import { formatMileage } from '@/types/section'
-import { buildSurveyPoints } from '@/utils/rate'
+import { buildSurveyPoints, isAdviceStale, levelFromRate } from '@/utils/rate'
 
 /** 触发浏览器下载 */
 export function download(filename: string, content: string, mime: string): void {
@@ -57,19 +57,27 @@ export function exportCrackCsv(
     '初测宽度(mm)',
     '初测长度(mm)',
     '状态',
-    '测次数',
-    '最新宽度(mm)',
+    '有效测次数',
+    '作废测次数',
+    '最新有效宽度(mm)',
     '月均速率(mm/月)',
+    '最新有效分级',
     '建议等级',
     '建议措施',
-    '建议状态'
+    '建议状态',
+    '建议复核'
   ]
   const lines: string[] = [header.map(csvCell).join(',')]
   cracks.forEach((crack) => {
     const ring = rings.find((item) => item.id === crack.ringId)
     const section = sections.find((item) => item.id === crack.sectionId)
-    const points = buildSurveyPoints(surveys.filter((survey) => survey.crackId === crack.id))
+    const crackSurveys = surveys.filter((survey) => survey.crackId === crack.id)
+    // buildSurveyPoints 默认只取有效测次：作废读数不进宽度、速率与预警
+    const points = buildSurveyPoints(crackSurveys)
+    const voidedCount = crackSurveys.filter((survey) => survey.voided === true).length
     const advice = advices.find((item) => item.crackId === crack.id)
+    const latest = points.length > 0 ? points[points.length - 1] : null
+    const currentLevel = latest ? levelFromRate(latest.rate) : '一般'
     lines.push(
       [
         section ? section.line : '—',
@@ -80,15 +88,18 @@ export function exportCrackCsv(
         crack.code,
         crack.position,
         crack.direction,
-        crack.widthMm,
+        points.length > 0 ? points[0].widthMm : crack.widthMm,
         crack.lengthMm,
         crack.state,
         points.length,
-        points.length > 0 ? points[points.length - 1].widthMm : crack.widthMm,
-        points.length > 0 ? points[points.length - 1].rate : 0,
+        voidedCount,
+        latest ? latest.widthMm : crack.widthMm,
+        latest ? latest.rate : 0,
+        currentLevel,
         advice ? advice.level : '未分级',
         advice ? advice.measure : '—',
-        advice ? advice.state : '—'
+        advice ? advice.state : '—',
+        advice && isAdviceStale(advice, currentLevel) ? '待复核' : ''
       ]
         .map(csvCell)
         .join(',')

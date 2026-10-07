@@ -39,7 +39,7 @@ import {
   type AdviceState
 } from '@/types/advice'
 import { exportCrackCsv } from '@/utils/export'
-import { formatMm } from '@/utils/rate'
+import { formatMm, isAdviceStale } from '@/utils/rate'
 
 type FilterModel = { keyword: string; [key: string]: string | string[] | boolean }
 
@@ -101,6 +101,14 @@ const rows = computed(() =>
 const pendingCount = computed(() => adviceTable.rows.value.filter((item) => item.state === '待下发').length)
 const issuedCount = computed(() => adviceTable.rows.value.filter((item) => item.state === '已下发').length)
 const doneCount = computed(() => adviceTable.rows.value.filter((item) => item.state === '已完成').length)
+
+/** 历史建议等级与最新有效分级不一致 → 待复核（措施与状态保留不改） */
+function staleOf(crackId: string): boolean {
+  return isAdviceStale(
+    adviceTable.rows.value.find((item) => item.crackId === crackId) ?? null,
+    surveyStore.levelMap[crackId] ?? null
+  )
+}
 
 /* ------------------------------ 表单 ------------------------------ */
 
@@ -309,6 +317,7 @@ function adviceRowKey(row: AdviceRow): string {
       <StatBadge label="待下发" :value="pendingCount" suffix="条" icon="Histogram" tone="warning" />
       <StatBadge label="已下发" :value="issuedCount" suffix="条" icon="DataLine" tone="info" />
       <StatBadge label="已完成" :value="doneCount" suffix="条" icon="CircleCheckFilled" tone="success" />
+      <StatBadge label="作废读数" :value="surveyStore.totalVoidedCount" suffix="次" icon="CircleClose" tone="default" />
     </div>
 
     <FilterBar
@@ -351,12 +360,24 @@ function adviceRowKey(row: AdviceRow): string {
             {{ formatMm(crackOf(row.crackId)?.widthMm ?? 0) }}
           </template>
         </el-table-column>
-        <el-table-column label="建议等级" width="150">
+        <el-table-column label="建议等级" width="130">
           <template #default="{ row }">
             <LevelTag :level="row.level" size="small" />
           </template>
         </el-table-column>
-        <el-table-column label="建议措施" width="110">
+        <el-table-column label="最新有效分级" width="160">
+          <template #default="{ row }">
+            <LevelTag :level="surveyStore.levelMap[row.crackId] ?? '一般'" size="small" plain />
+            <el-tooltip
+              v-if="staleOf(row.crackId)"
+              content="作废/恢复后最新有效分级与历史建议等级不一致，措施与状态保留，请人工复核"
+              placement="top"
+            >
+              <el-tag size="small" type="danger" effect="dark" style="margin-left: 6px">待复核</el-tag>
+            </el-tooltip>
+          </template>
+        </el-table-column>
+        <el-table-column label="建议措施" width="100">
           <template #default="{ row }">
             <el-tag size="small" effect="plain">{{ row.measure }}</el-tag>
           </template>

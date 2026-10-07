@@ -313,8 +313,13 @@ function latestDateOf(crackId: string): string {
         <el-table-column label="当前长度" width="110">
           <template #default="{ row }">{{ row.crack.lengthMm }} mm</template>
         </el-table-column>
-        <el-table-column label="测次" width="72">
-          <template #default="{ row }">{{ row.surveyCount }}</template>
+        <el-table-column label="测次" width="92">
+          <template #default="{ row }">
+            {{ row.surveyCount }}
+            <el-tag v-if="row.voidedCount > 0" size="small" type="info" effect="plain" style="margin-left: 2px">
+              废 {{ row.voidedCount }}
+            </el-tag>
+          </template>
         </el-table-column>
         <el-table-column label="最近复测" width="112">
           <template #default="{ row }">{{ latestDateOf(row.crack.id) }}</template>

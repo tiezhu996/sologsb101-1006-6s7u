@@ -15,7 +15,7 @@ import type { Advice } from '@/types/advice'
 export const DB_NAME = 'gbtunnelcrack'
 
 /** 当前数据结构版本号：调整表结构必须递增并补 upgrade 迁移 */
-export const DB_VERSION = 2
+export const DB_VERSION = 3
 
 /** localStorage 侧少量元数据键名 */
 export const LS_KEYS = {
@@ -52,7 +52,7 @@ export interface Revisioned {
   revision?: number
 }
 
-export const ROW_REVISION = 2
+export const ROW_REVISION = 3
 
 export type SectionRow = Section & Revisioned
 export type RingRow = Ring & Revisioned
@@ -80,7 +80,7 @@ class TunnelCrackDatabase extends Dexie {
     })
 
     // v2：裂缝补充 sectionId 冗余列（按区间筛选/统计免联表）；复测补充 surveyor 索引；建议补充 note 字段
-    this.version(DB_VERSION)
+    this.version(2)
       .stores({
         sections: 'id, line, structureType, startMileage, updatedAt',
         rings: 'id, sectionId, ringNo, mileage, segmentType, updatedAt',
@@ -124,6 +124,30 @@ class TunnelCrackDatabase extends Dexie {
             if (typeof survey.deltaWidthMm !== 'number' || !Number.isFinite(survey.deltaWidthMm)) {
               survey.deltaWidthMm = 0
             }
+          })
+      })
+
+    // v3：复测支持作废/恢复——新增 voided、voidReason、voidedAt（原读数完整保留）；
+    // 索引不变，仅对历史复测行补默认作废字段。
+    this.version(DB_VERSION)
+      .stores({
+        sections: 'id, line, structureType, startMileage, updatedAt',
+        rings: 'id, sectionId, ringNo, mileage, segmentType, updatedAt',
+        cracks: 'id, ringId, sectionId, code, position, direction, state, updatedAt',
+        surveys: 'id, crackId, seq, date, surveyor, updatedAt',
+        advices: 'id, crackId, level, measure, state, updatedAt'
+      })
+      .upgrade(async (tx) => {
+        await tx
+          .table('surveys')
+          .toCollection()
+          .modify((survey: Record<string, unknown>) => {
+            if (survey.voided !== true) {
+              survey.voided = false
+              survey.voidReason = ''
+              survey.voidedAt = 0
+            }
+            survey.revision = ROW_REVISION
           })
       })
   }
@@ -316,6 +340,17 @@ export async function exportSnapshot(): Promise<BackupPayload> {
   }
 }
 
+/** 规范化历史/导入复测行的作废字段（缺失视为有效） */
+function normalizeSurveyRow(row: SurveyRow): SurveyRow {
+  const voided = row.voided === true
+  return {
+    ...row,
+    voided,
+    voidReason: voided ? row.voidReason ?? '' : '',
+    voidedAt: voided ? row.voidedAt ?? 0 : 0
+  }
+}
+
 /** 用快照覆盖整库 */
 export async function importSnapshot(payload: BackupPayload): Promise<void> {
   await db.transaction('rw', db.sections, db.rings, db.cracks, db.surveys, db.advices, async () => {
@@ -329,9 +364,48 @@ export async function importSnapshot(payload: BackupPayload): Promise<void> {
     const rev = <T>(row: T): T & Revisioned => ({ ...row, revision: ROW_REVISION })
     await db.sections.bulkPut((payload.sections ?? []).map(rev))
     await db.rings.bulkPut((payload.rings ?? []).map(rev))
-    await db.cracks.bulkPut((payload.cracks ?? []).map(rev))
-    await db.surveys.bulkPut((payload.surveys ?? []).map(rev))
+    const importedCracks = (payload.cracks ?? []).map(rev)
+    await db.cracks.bulkPut(importedCracks)
+    const importedSurveys = (payload.surveys ?? []).map((row) => rev(normalizeSurveyRow(row)))
+    await db.surveys.bulkPut(importedSurveys)
     await db.advices.bulkPut((payload.advices ?? []).map(rev))
+
+    // 导入后按日期重排测次序号、按有效链重算变化量，并把台账宽度/长度同步为最新有效读数
+    const byCrack = new Map<string, SurveyRow[]>()
+    importedSurveys.forEach((survey) => {
+      const list = byCrack.get(survey.crackId)
+      if (list) list.push(survey)
+      else byCrack.set(survey.crackId, [survey])
+    })
+    for (const [crackId, rows] of byCrack) {
+      const ordered = [...rows].sort((a, b) =>
+        a.date === b.date ? a.seq - b.seq : a.date.localeCompare(b.date)
+      )
+      const validChain: SurveyRow[] = []
+      const patches: SurveyRow[] = []
+      ordered.forEach((row, index) => {
+        const seq = index + 1
+        if (row.voided === true) {
+          patches.push({ ...row, seq })
+          return
+        }
+        const prev = validChain[validChain.length - 1]
+        patches.push({
+          ...row,
+          seq,
+          deltaWidthMm: prev ? Number((row.widthMm - prev.widthMm).toFixed(2)) : 0
+        })
+        validChain.push(row)
+      })
+      await db.surveys.bulkPut(patches)
+      const latestValid = validChain[validChain.length - 1]
+      if (latestValid) {
+        await db.cracks.update(crackId, {
+          widthMm: latestValid.widthMm,
+          lengthMm: latestValid.lengthMm
+        })
+      }
+    }
   })
 }
 
