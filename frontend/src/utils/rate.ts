@@ -1,9 +1,10 @@
 /**
  * 裂缝发展速率计算与分级
- * 速率口径：相邻两次复测的宽度变化量 ÷ 间隔天数 × 30，单位 mm/月
+ * 速率口径：相邻两次有效复测的宽度变化量 ÷ 间隔天数 × 30，单位 mm/月
+ * 作废测次保留原值展示，但不进入速率链、变化量与预警计算（按最新有效测次取值）。
  */
 import type { AdviceLevel } from '@/types/advice'
-import type { Survey, SurveyPoint } from '@/types/survey'
+import { isSurveyEffective, type Survey, type SurveyPoint } from '@/types/survey'
 
 /** 预警阈值：月均速率 ≥ 0.10 mm/月 记预警（较重及以上） */
 export const RATE_WARNING = 0.1
@@ -72,36 +73,55 @@ export const LEVEL_WEIGHT: Record<AdviceLevel, number> = {
   严重: 30
 }
 
-/** 把某条裂缝的全部测次整理成折线取点（按测次升序） */
+/**
+ * 把某条裂缝的全部测次整理成折线取点（按测次升序）。
+ * 变化量与速率只沿「有效测次链」计算：作废测次跳过对比，保留原值取点但不参与聚合。
+ */
 export function buildSurveyPoints(surveys: Survey[]): SurveyPoint[] {
   const sorted = [...surveys].sort((a, b) => a.seq - b.seq)
   const points: SurveyPoint[] = []
-  sorted.forEach((survey, index) => {
-    const previous = index === 0 ? null : sorted[index - 1]
-    const rawDelta = previous ? survey.widthMm - previous.widthMm : 0
-    const days = previous ? daysBetween(previous.date, survey.date) : 1
+  let previousEffective: Survey | null = null
+  sorted.forEach((survey) => {
+    const effective = isSurveyEffective(survey)
+    const rawDelta = effective && previousEffective ? survey.widthMm - previousEffective.widthMm : 0
+    const days = effective && previousEffective ? daysBetween(previousEffective.date, survey.date) : 1
     points.push({
       seq: survey.seq,
       date: survey.date,
       widthMm: survey.widthMm,
       lengthMm: survey.lengthMm,
-      deltaWidthMm: round(previous ? rawDelta : survey.deltaWidthMm, 2),
-      rate: previous ? monthlyRate(rawDelta, days) : 0
+      // 作废测次保留入库时的原始变化量；有效测次沿有效链重算
+      deltaWidthMm: effective ? round(rawDelta, 2) : round(survey.deltaWidthMm, 2),
+      rate: effective && previousEffective ? monthlyRate(rawDelta, days) : 0,
+      voided: !effective
     })
+    if (effective) previousEffective = survey
   })
   return points
 }
 
-/** 最新测次的月均速率 */
-export function latestRate(points: SurveyPoint[]): number {
-  if (points.length === 0) return 0
-  return points[points.length - 1].rate
+/** 取点中的有效测次（未作废） */
+export function effectivePoints(points: SurveyPoint[]): SurveyPoint[] {
+  return points.filter((point) => !point.voided)
 }
 
-/** 累计宽度变化量（末测次 - 首测次） */
+/** 最新有效测次 */
+export function latestEffectivePoint(points: SurveyPoint[]): SurveyPoint | null {
+  const effective = effectivePoints(points)
+  return effective.length > 0 ? effective[effective.length - 1] : null
+}
+
+/** 最新有效测次的月均速率 */
+export function latestRate(points: SurveyPoint[]): number {
+  const latest = latestEffectivePoint(points)
+  return latest ? latest.rate : 0
+}
+
+/** 累计宽度变化量（末次有效测次 - 首次有效测次） */
 export function totalDelta(points: SurveyPoint[]): number {
-  if (points.length < 2) return 0
-  return round(points[points.length - 1].widthMm - points[0].widthMm, 2)
+  const effective = effectivePoints(points)
+  if (effective.length < 2) return 0
+  return round(effective[effective.length - 1].widthMm - effective[0].widthMm, 2)
 }
 
 /** 判定依据文案 */

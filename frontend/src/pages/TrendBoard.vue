@@ -87,6 +87,17 @@ function adviceOf(crackId: string): Advice | null {
   return adviceTable.rows.value.find((row) => row.crackId === crackId) ?? null
 }
 
+/**
+ * 待复核判定：历史建议的措施与状态保留不变，
+ * 但建议等级与最新有效测次分级不一致时，在排行与建议页标成「待复核」。
+ */
+function adviceNeedsReview(crackId: string): boolean {
+  const advice = adviceOf(crackId)
+  if (!advice) return false
+  const currentLevel = surveyStore.levelMap[crackId] ?? '一般'
+  return advice.level !== currentLevel
+}
+
 async function generateAdvice(row: CrackEnriched): Promise<void> {
   if (adviceOf(row.crack.id)) {
     ElMessage.info(`${row.crack.code} 已存在整治建议，可在「建议与备份」页维护`)
@@ -179,6 +190,10 @@ const drawerAdvice = computed(() =>
   drawerCrackId.value ? adviceOf(drawerCrackId.value) : null
 )
 
+const drawerAdviceNeedsReview = computed(() =>
+  drawerCrackId.value ? adviceNeedsReview(drawerCrackId.value) : false
+)
+
 function crackRowKey(row: CrackEnriched): string {
   return row.crack.id
 }
@@ -198,7 +213,7 @@ function onOnlyWarningChange(value: string | number | boolean): void {
       <div>
         <h2 class="page-head__title">发展速率分级与预警</h2>
         <p class="page-head__desc">
-          按月均速率降序排列，速率 ≥ {{ rateThresholds.warning }} mm/月 记预警，≥ {{ rateThresholds.severe }} mm/月 判严重。
+          按最新有效测次的月均速率降序排列（作废测次不参与），速率 ≥ {{ rateThresholds.warning }} mm/月 记预警，≥ {{ rateThresholds.severe }} mm/月 判严重。
         </p>
       </div>
       <div class="page-head__actions">
@@ -283,11 +298,20 @@ function onOnlyWarningChange(value: string | number | boolean): void {
             <LevelTag :level="row.level" :rate="row.surveyCount > 1 ? row.rate : undefined" size="small" />
           </template>
         </el-table-column>
-        <el-table-column label="建议" width="120">
+        <el-table-column label="建议" width="150">
           <template #default="{ row }">
-            <el-tag v-if="adviceOf(row.crack.id)" size="small" effect="plain" type="success">
-              {{ adviceOf(row.crack.id)?.state }}
-            </el-tag>
+            <template v-if="adviceOf(row.crack.id)">
+              <el-tag size="small" effect="plain" type="success">
+                {{ adviceOf(row.crack.id)?.state }}
+              </el-tag>
+              <el-tooltip
+                v-if="adviceNeedsReview(row.crack.id)"
+                content="建议等级与最新有效测次分级不一致，请复核"
+                placement="top"
+              >
+                <el-tag size="small" type="warning" effect="dark" style="margin-left: 4px">待复核</el-tag>
+              </el-tooltip>
+            </template>
             <span v-else class="muted">未生成</span>
           </template>
         </el-table-column>
@@ -372,21 +396,35 @@ function onOnlyWarningChange(value: string | number | boolean): void {
           <span v-if="drawerAdvice" class="muted" style="margin-left: 10px">
             建议：{{ drawerAdvice.measure }} · {{ drawerAdvice.state }}
           </span>
-          <span v-else class="muted" style="margin-left: 10px">尚未生成整治建议</span>
+          <el-tag v-if="drawerAdviceNeedsReview" size="small" type="warning" effect="dark" style="margin-left: 6px">
+            待复核
+          </el-tag>
+          <span v-if="!drawerAdvice" class="muted" style="margin-left: 10px">尚未生成整治建议</span>
         </div>
 
-        <h4 class="panel-subtitle">测次序列</h4>
+        <h4 class="panel-subtitle">
+          测次序列
+          <span v-if="drawerTrend.voidedCount.value > 0" class="muted">
+            （{{ drawerTrend.voidedCount.value }} 条已作废，不参与速率计算）
+          </span>
+        </h4>
         <el-table :data="drawerTrend.points.value" border stripe size="small">
-          <el-table-column prop="seq" label="测次" width="70" />
-          <el-table-column prop="date" label="日期" width="120" />
-          <el-table-column label="宽度(mm)" width="110">
+          <el-table-column prop="seq" label="测次" width="64" />
+          <el-table-column prop="date" label="日期" width="110" />
+          <el-table-column label="宽度(mm)" width="96">
             <template #default="{ row }">{{ row.widthMm.toFixed(2) }}</template>
           </el-table-column>
-          <el-table-column label="变化量(mm)" width="120">
+          <el-table-column label="变化量(mm)" width="100">
             <template #default="{ row }">{{ row.deltaWidthMm.toFixed(2) }}</template>
           </el-table-column>
-          <el-table-column label="月均速率" width="120">
+          <el-table-column label="月均速率" width="100">
             <template #default="{ row }">{{ row.rate.toFixed(3) }}</template>
+          </el-table-column>
+          <el-table-column label="状态" width="80">
+            <template #default="{ row }">
+              <el-tag v-if="row.voided" size="small" type="danger" effect="plain">作废</el-tag>
+              <span v-else class="muted">有效</span>
+            </template>
           </el-table-column>
         </el-table>
 

@@ -1,5 +1,6 @@
 /**
  * 裂缝发展态势：拉取某条裂缝的全部测次，派生变化量序列、月均速率与分级结果。
+ * 速率、变化量与等级只沿有效测次（未作废）计算；作废测次保留在序列中原值展示。
  * 被复测对比页与速率分级页消费。
  */
 import { computed, ref, shallowRef, toValue, watch, type ComputedRef, type MaybeRefOrGetter, type Ref } from 'vue'
@@ -7,20 +8,23 @@ import { liveQuery } from 'dexie'
 import type { Survey, SurveyPoint } from '@/types/survey'
 import type { AdviceLevel } from '@/types/advice'
 import { db } from '@/utils/db'
-import { buildSurveyPoints, latestRate, levelFromRate, totalDelta } from '@/utils/rate'
+import { buildSurveyPoints, latestEffectivePoint, latestRate, levelFromRate, totalDelta } from '@/utils/rate'
 
 export interface UseCrackTrendResult {
   surveys: Ref<Survey[]>
   points: ComputedRef<SurveyPoint[]>
+  /** 最新有效测次（作废测次不参与） */
   latest: ComputedRef<SurveyPoint | null>
-  /** 最新测次的月均速率（mm/月） */
+  /** 最新有效测次的月均速率（mm/月） */
   rate: ComputedRef<number>
-  /** 累计宽度变化量（mm） */
+  /** 累计宽度变化量（mm，有效测次链） */
   delta: ComputedRef<number>
   /** 由速率推导的等级 */
   level: ComputedRef<AdviceLevel>
   /** 是否已发展（速率超过预警阈值） */
   warning: ComputedRef<boolean>
+  /** 已作废测次数量 */
+  voidedCount: ComputedRef<number>
   loading: Ref<boolean>
   error: Ref<string | null>
   reload: () => Promise<void>
@@ -78,11 +82,12 @@ export function useCrackTrend(crackId: MaybeRefOrGetter<string | null | undefine
   watch(() => toValue(crackId), subscribe, { immediate: true })
 
   const points = computed(() => buildSurveyPoints(surveys.value))
-  const latest = computed(() => (points.value.length > 0 ? points.value[points.value.length - 1] : null))
+  const latest = computed(() => latestEffectivePoint(points.value))
   const rate = computed(() => latestRate(points.value))
   const delta = computed(() => totalDelta(points.value))
   const level = computed(() => levelFromRate(rate.value))
   const warning = computed(() => level.value !== '一般')
+  const voidedCount = computed(() => points.value.filter((point) => point.voided).length)
 
   return {
     surveys,
@@ -92,6 +97,7 @@ export function useCrackTrend(crackId: MaybeRefOrGetter<string | null | undefine
     delta,
     level,
     warning,
+    voidedCount,
     loading,
     error,
     reload: load

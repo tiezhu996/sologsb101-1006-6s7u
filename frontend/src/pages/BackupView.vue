@@ -36,6 +36,7 @@ import {
   ADVICE_STATE_FLOW,
   EMPTY_ADVICE_DRAFT,
   type AdviceDraft,
+  type AdviceLevel,
   type AdviceState
 } from '@/types/advice'
 import { exportCrackCsv } from '@/utils/export'
@@ -101,6 +102,18 @@ const rows = computed(() =>
 const pendingCount = computed(() => adviceTable.rows.value.filter((item) => item.state === '待下发').length)
 const issuedCount = computed(() => adviceTable.rows.value.filter((item) => item.state === '已下发').length)
 const doneCount = computed(() => adviceTable.rows.value.filter((item) => item.state === '已完成').length)
+
+/** 最新有效测次分级（无测次时按「一般」） */
+function currentLevelOf(crackId: string): AdviceLevel {
+  return surveyStore.levelMap[crackId] ?? '一般'
+}
+
+/** 建议等级与最新有效分级不一致 → 待复核（措施与状态保留不变） */
+function needsReview(advice: AdviceRow): boolean {
+  return advice.level !== currentLevelOf(advice.crackId)
+}
+
+const reviewCount = computed(() => adviceTable.rows.value.filter((item) => needsReview(item)).length)
 
 /* ------------------------------ 表单 ------------------------------ */
 
@@ -293,7 +306,7 @@ function adviceRowKey(row: AdviceRow): string {
       <div>
         <h2 class="page-head__title">整治建议与数据备份</h2>
         <p class="page-head__desc">
-          维护建议措施与状态流转（待下发 → 已下发 → 已完成），并导出/导入 IndexedDB 全量 JSON 存档。
+          维护建议措施与状态流转（待下发 → 已下发 → 已完成）；建议等级与最新有效分级不一致时标「待复核」。导出/导入 IndexedDB 全量 JSON 存档（含测次作废状态）。
         </p>
       </div>
       <div class="page-head__actions">
@@ -309,6 +322,7 @@ function adviceRowKey(row: AdviceRow): string {
       <StatBadge label="待下发" :value="pendingCount" suffix="条" icon="Histogram" tone="warning" />
       <StatBadge label="已下发" :value="issuedCount" suffix="条" icon="DataLine" tone="info" />
       <StatBadge label="已完成" :value="doneCount" suffix="条" icon="CircleCheckFilled" tone="success" />
+      <StatBadge label="待复核" :value="reviewCount" suffix="条" icon="WarningFilled" tone="danger" />
     </div>
 
     <FilterBar
@@ -351,9 +365,16 @@ function adviceRowKey(row: AdviceRow): string {
             {{ formatMm(crackOf(row.crackId)?.widthMm ?? 0) }}
           </template>
         </el-table-column>
-        <el-table-column label="建议等级" width="150">
+        <el-table-column label="建议等级" width="180">
           <template #default="{ row }">
             <LevelTag :level="row.level" size="small" />
+            <el-tooltip
+              v-if="needsReview(row)"
+              :content="`最新有效分级为「${currentLevelOf(row.crackId)}」，与建议等级不一致，请复核`"
+              placement="top"
+            >
+              <el-tag size="small" type="warning" effect="dark" style="margin-left: 6px">待复核</el-tag>
+            </el-tooltip>
           </template>
         </el-table-column>
         <el-table-column label="建议措施" width="110">

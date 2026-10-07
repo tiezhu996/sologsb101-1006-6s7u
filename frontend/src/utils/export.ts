@@ -8,7 +8,7 @@ import type { Crack, CrackState } from '@/types/crack'
 import type { Survey } from '@/types/survey'
 import type { Advice } from '@/types/advice'
 import { formatMileage } from '@/types/section'
-import { buildSurveyPoints } from '@/utils/rate'
+import { buildSurveyPoints, effectivePoints, levelFromRate } from '@/utils/rate'
 
 /** 触发浏览器下载 */
 export function download(filename: string, content: string, mime: string): void {
@@ -37,7 +37,7 @@ export function exportBackupJson(payload: unknown): string {
   return filename
 }
 
-/** 导出裂缝台账 CSV（含所属区间/环片/最新速率/处置状态） */
+/** 导出裂缝台账 CSV（台账宽度/速率为有效测次口径，并带测次作废状态与建议复核标记） */
 export function exportCrackCsv(
   sections: Section[],
   rings: Ring[],
@@ -54,22 +54,29 @@ export function exportCrackCsv(
     '裂缝编号',
     '部位',
     '走向',
-    '初测宽度(mm)',
-    '初测长度(mm)',
+    '台账当前宽度(mm)',
+    '台账当前长度(mm)',
     '状态',
-    '测次数',
-    '最新宽度(mm)',
+    '有效测次数',
+    '作废测次数',
+    '最新有效宽度(mm)',
+    '最新有效长度(mm)',
+    '最新有效日期',
     '月均速率(mm/月)',
     '建议等级',
     '建议措施',
-    '建议状态'
+    '建议状态',
+    '等级复核'
   ]
   const lines: string[] = [header.map(csvCell).join(',')]
   cracks.forEach((crack) => {
     const ring = rings.find((item) => item.id === crack.ringId)
     const section = sections.find((item) => item.id === crack.sectionId)
     const points = buildSurveyPoints(surveys.filter((survey) => survey.crackId === crack.id))
+    const effective = effectivePoints(points)
+    const latest = effective.length > 0 ? effective[effective.length - 1] : null
     const advice = advices.find((item) => item.crackId === crack.id)
+    const currentLevel = levelFromRate(latest ? latest.rate : 0)
     lines.push(
       [
         section ? section.line : '—',
@@ -83,12 +90,16 @@ export function exportCrackCsv(
         crack.widthMm,
         crack.lengthMm,
         crack.state,
-        points.length,
-        points.length > 0 ? points[points.length - 1].widthMm : crack.widthMm,
-        points.length > 0 ? points[points.length - 1].rate : 0,
+        effective.length,
+        points.length - effective.length,
+        latest ? latest.widthMm : crack.widthMm,
+        latest ? latest.lengthMm : crack.lengthMm,
+        latest ? latest.date : '—',
+        latest ? latest.rate : 0,
         advice ? advice.level : '未分级',
         advice ? advice.measure : '—',
-        advice ? advice.state : '—'
+        advice ? advice.state : '—',
+        advice && advice.level !== currentLevel ? '待复核' : '—'
       ]
         .map(csvCell)
         .join(',')

@@ -25,7 +25,10 @@ export interface CrackEnriched {
   sectionLabel: string
   rate: number
   level: AdviceLevel
+  /** 有效测次数量（未作废） */
   surveyCount: number
+  /** 已作废测次数量 */
+  voidedCount: number
 }
 
 export const useCrackStore = defineStore('crack', () => {
@@ -55,7 +58,8 @@ export const useCrackStore = defineStore('crack', () => {
         sectionLabel: section ? `${section.line} ${formatMileage(ring ? ring.mileage : section.startMileage)}` : '区间已删除',
         rate: summary ? summary.rate : 0,
         level: (summary ? summary.level : '一般') as AdviceLevel,
-        surveyCount: summary ? summary.count : 0
+        surveyCount: summary ? summary.count : 0,
+        voidedCount: summary ? summary.voidedCount : 0
       }
     })
   )

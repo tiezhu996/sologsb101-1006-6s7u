@@ -15,7 +15,7 @@ import type { Advice } from '@/types/advice'
 export const DB_NAME = 'gbtunnelcrack'
 
 /** 当前数据结构版本号：调整表结构必须递增并补 upgrade 迁移 */
-export const DB_VERSION = 2
+export const DB_VERSION = 3
 
 /** localStorage 侧少量元数据键名 */
 export const LS_KEYS = {
@@ -34,6 +34,10 @@ export const DEFAULT_UI_PREFS: UiPrefs = {
   trendOnlyWarning: false
 }
 
+/** 存档中的测次行：兼容 v3 之前缺少作废字段的旧备份 */
+export type SurveySnapshot = Omit<Survey, 'voided' | 'voidReason' | 'voidedAt'> &
+  Partial<Pick<Survey, 'voided' | 'voidReason' | 'voidedAt'>>
+
 /** 整库备份文件结构 */
 export interface BackupPayload {
   app: 'gbtunnelcrack'
@@ -42,7 +46,7 @@ export interface BackupPayload {
   sections: Section[]
   rings: Ring[]
   cracks: Crack[]
-  surveys: Survey[]
+  surveys: SurveySnapshot[]
   advices: Advice[]
 }
 
@@ -52,7 +56,7 @@ export interface Revisioned {
   revision?: number
 }
 
-export const ROW_REVISION = 2
+export const ROW_REVISION = 3
 
 export type SectionRow = Section & Revisioned
 export type RingRow = Ring & Revisioned
@@ -126,6 +130,32 @@ class TunnelCrackDatabase extends Dexie {
             }
           })
       })
+
+    // v3：复测支持作废/恢复——补齐作废标记字段（保留原值、移出有效测次计算）；索引结构不变
+    this.version(DB_VERSION).upgrade(async (tx) => {
+      await tx
+        .table('surveys')
+        .toCollection()
+        .modify((survey: Record<string, unknown>) => {
+          if (typeof survey.voided !== 'boolean') survey.voided = false
+          if (typeof survey.voidReason !== 'string') survey.voidReason = ''
+          if (typeof survey.voidedAt !== 'number') survey.voidedAt = null
+        })
+
+      // 全部业务行修订号升级到 3
+      const tables: Array<Table<Record<string, unknown>, string>> = [
+        tx.table('sections'),
+        tx.table('rings'),
+        tx.table('cracks'),
+        tx.table('surveys'),
+        tx.table('advices')
+      ]
+      for (const table of tables) {
+        await table.toCollection().modify((row: Record<string, unknown>) => {
+          row.revision = ROW_REVISION
+        })
+      }
+    })
   }
 }
 
@@ -189,25 +219,26 @@ const SEED_CRACKS: CrackRow[] = [
 
 const SEED_SURVEYS: SurveyRow[] = [
   // crack-1：0.42 → 0.71 → 1.02，末次月均 0.31 mm/月（严重）
-  { id: 'sv-1-1', crackId: 'crack-1', seq: 1, date: '2024-04-08', widthMm: 0.42, lengthMm: 620, deltaWidthMm: 0, surveyor: '周维', createdAt: stamp(-73), updatedAt: stamp(-73), revision: ROW_REVISION },
-  { id: 'sv-1-2', crackId: 'crack-1', seq: 2, date: '2024-05-08', widthMm: 0.71, lengthMm: 690, deltaWidthMm: 0.29, surveyor: '周维', createdAt: stamp(-43), updatedAt: stamp(-43), revision: ROW_REVISION },
-  { id: 'sv-1-3', crackId: 'crack-1', seq: 3, date: '2024-06-07', widthMm: 1.02, lengthMm: 745, deltaWidthMm: 0.31, surveyor: '李文博', createdAt: stamp(-13), updatedAt: stamp(-13), revision: ROW_REVISION },
+  { id: 'sv-1-1', crackId: 'crack-1', seq: 1, date: '2024-04-08', widthMm: 0.42, lengthMm: 620, deltaWidthMm: 0, surveyor: '周维', voided: false, voidReason: '', voidedAt: null, createdAt: stamp(-73), updatedAt: stamp(-73), revision: ROW_REVISION },
+  { id: 'sv-1-2', crackId: 'crack-1', seq: 2, date: '2024-05-08', widthMm: 0.71, lengthMm: 690, deltaWidthMm: 0.29, surveyor: '周维', voided: false, voidReason: '', voidedAt: null, createdAt: stamp(-43), updatedAt: stamp(-43), revision: ROW_REVISION },
+  { id: 'sv-1-3', crackId: 'crack-1', seq: 3, date: '2024-06-07', widthMm: 1.02, lengthMm: 745, deltaWidthMm: 0.31, surveyor: '李文博', voided: false, voidReason: '', voidedAt: null, createdAt: stamp(-13), updatedAt: stamp(-13), revision: ROW_REVISION },
   // crack-2：0.18 → 0.21 → 0.25，末次月均 0.04 mm/月（一般）
-  { id: 'sv-2-1', crackId: 'crack-2', seq: 1, date: '2024-04-10', widthMm: 0.18, lengthMm: 410, deltaWidthMm: 0, surveyor: '李文博', createdAt: stamp(-71), updatedAt: stamp(-71), revision: ROW_REVISION },
-  { id: 'sv-2-2', crackId: 'crack-2', seq: 2, date: '2024-05-10', widthMm: 0.21, lengthMm: 430, deltaWidthMm: 0.03, surveyor: '李文博', createdAt: stamp(-41), updatedAt: stamp(-41), revision: ROW_REVISION },
-  { id: 'sv-2-3', crackId: 'crack-2', seq: 3, date: '2024-06-09', widthMm: 0.25, lengthMm: 452, deltaWidthMm: 0.04, surveyor: '李文博', createdAt: stamp(-11), updatedAt: stamp(-11), revision: ROW_REVISION },
-  // crack-3：0.55 → 0.72 → 0.98，末次月均 0.26 mm/月（较重）
-  { id: 'sv-3-1', crackId: 'crack-3', seq: 1, date: '2024-04-12', widthMm: 0.55, lengthMm: 880, deltaWidthMm: 0, surveyor: '陈立', createdAt: stamp(-69), updatedAt: stamp(-69), revision: ROW_REVISION },
-  { id: 'sv-3-2', crackId: 'crack-3', seq: 2, date: '2024-05-12', widthMm: 0.72, lengthMm: 905, deltaWidthMm: 0.17, surveyor: '陈立', createdAt: stamp(-39), updatedAt: stamp(-39), revision: ROW_REVISION },
-  { id: 'sv-3-3', crackId: 'crack-3', seq: 3, date: '2024-06-11', widthMm: 0.98, lengthMm: 962, deltaWidthMm: 0.26, surveyor: '陈立', createdAt: stamp(-9), updatedAt: stamp(-9), revision: ROW_REVISION },
+  { id: 'sv-2-1', crackId: 'crack-2', seq: 1, date: '2024-04-10', widthMm: 0.18, lengthMm: 410, deltaWidthMm: 0, surveyor: '李文博', voided: false, voidReason: '', voidedAt: null, createdAt: stamp(-71), updatedAt: stamp(-71), revision: ROW_REVISION },
+  { id: 'sv-2-2', crackId: 'crack-2', seq: 2, date: '2024-05-10', widthMm: 0.21, lengthMm: 430, deltaWidthMm: 0.03, surveyor: '李文博', voided: false, voidReason: '', voidedAt: null, createdAt: stamp(-41), updatedAt: stamp(-41), revision: ROW_REVISION },
+  { id: 'sv-2-3', crackId: 'crack-2', seq: 3, date: '2024-06-09', widthMm: 0.25, lengthMm: 452, deltaWidthMm: 0.04, surveyor: '李文博', voided: false, voidReason: '', voidedAt: null, createdAt: stamp(-11), updatedAt: stamp(-11), revision: ROW_REVISION },
+  // crack-3：0.55 → 0.72 → 0.98，末次月均 0.26 mm/月（较重）；第 4 测次为误录读数，已作废保留原值
+  { id: 'sv-3-1', crackId: 'crack-3', seq: 1, date: '2024-04-12', widthMm: 0.55, lengthMm: 880, deltaWidthMm: 0, surveyor: '陈立', voided: false, voidReason: '', voidedAt: null, createdAt: stamp(-69), updatedAt: stamp(-69), revision: ROW_REVISION },
+  { id: 'sv-3-2', crackId: 'crack-3', seq: 2, date: '2024-05-12', widthMm: 0.72, lengthMm: 905, deltaWidthMm: 0.17, surveyor: '陈立', voided: false, voidReason: '', voidedAt: null, createdAt: stamp(-39), updatedAt: stamp(-39), revision: ROW_REVISION },
+  { id: 'sv-3-3', crackId: 'crack-3', seq: 3, date: '2024-06-11', widthMm: 0.98, lengthMm: 962, deltaWidthMm: 0.26, surveyor: '陈立', voided: false, voidReason: '', voidedAt: null, createdAt: stamp(-9), updatedAt: stamp(-9), revision: ROW_REVISION },
+  { id: 'sv-3-4', crackId: 'crack-3', seq: 4, date: '2024-06-12', widthMm: 1.35, lengthMm: 990, deltaWidthMm: 0.37, surveyor: '李文博', voided: true, voidReason: '读数误录，现场复核宽度仍为 0.98 mm，作废保留备查', voidedAt: stamp(-8), createdAt: stamp(-8), updatedAt: stamp(-8), revision: ROW_REVISION },
   // crack-4：0.24 → 0.30，末次月均 0.06 mm/月（一般）
-  { id: 'sv-4-1', crackId: 'crack-4', seq: 1, date: '2024-04-15', widthMm: 0.24, lengthMm: 350, deltaWidthMm: 0, surveyor: '周维', createdAt: stamp(-66), updatedAt: stamp(-66), revision: ROW_REVISION },
-  { id: 'sv-4-2', crackId: 'crack-4', seq: 2, date: '2024-05-15', widthMm: 0.3, lengthMm: 366, deltaWidthMm: 0.06, surveyor: '周维', createdAt: stamp(-36), updatedAt: stamp(-36), revision: ROW_REVISION },
+  { id: 'sv-4-1', crackId: 'crack-4', seq: 1, date: '2024-04-15', widthMm: 0.24, lengthMm: 350, deltaWidthMm: 0, surveyor: '周维', voided: false, voidReason: '', voidedAt: null, createdAt: stamp(-66), updatedAt: stamp(-66), revision: ROW_REVISION },
+  { id: 'sv-4-2', crackId: 'crack-4', seq: 2, date: '2024-05-15', widthMm: 0.3, lengthMm: 366, deltaWidthMm: 0.06, surveyor: '周维', voided: false, voidReason: '', voidedAt: null, createdAt: stamp(-36), updatedAt: stamp(-36), revision: ROW_REVISION },
   // crack-5（已整治）：0.38 → 0.46 后停止复测
-  { id: 'sv-5-1', crackId: 'crack-5', seq: 1, date: '2024-02-20', widthMm: 0.38, lengthMm: 540, deltaWidthMm: 0, surveyor: '陈立', createdAt: stamp(-121), updatedAt: stamp(-121), revision: ROW_REVISION },
-  { id: 'sv-5-2', crackId: 'crack-5', seq: 2, date: '2024-03-21', widthMm: 0.46, lengthMm: 548, deltaWidthMm: 0.08, surveyor: '陈立', createdAt: stamp(-91), updatedAt: stamp(-91), revision: ROW_REVISION },
+  { id: 'sv-5-1', crackId: 'crack-5', seq: 1, date: '2024-02-20', widthMm: 0.38, lengthMm: 540, deltaWidthMm: 0, surveyor: '陈立', voided: false, voidReason: '', voidedAt: null, createdAt: stamp(-121), updatedAt: stamp(-121), revision: ROW_REVISION },
+  { id: 'sv-5-2', crackId: 'crack-5', seq: 2, date: '2024-03-21', widthMm: 0.46, lengthMm: 548, deltaWidthMm: 0.08, surveyor: '陈立', voided: false, voidReason: '', voidedAt: null, createdAt: stamp(-91), updatedAt: stamp(-91), revision: ROW_REVISION },
   // crack-6：仅初测一次
-  { id: 'sv-6-1', crackId: 'crack-6', seq: 1, date: '2024-05-06', widthMm: 0.12, lengthMm: 260, deltaWidthMm: 0, surveyor: '李文博', createdAt: stamp(-45), updatedAt: stamp(-45), revision: ROW_REVISION }
+  { id: 'sv-6-1', crackId: 'crack-6', seq: 1, date: '2024-05-06', widthMm: 0.12, lengthMm: 260, deltaWidthMm: 0, surveyor: '李文博', voided: false, voidReason: '', voidedAt: null, createdAt: stamp(-45), updatedAt: stamp(-45), revision: ROW_REVISION }
 ]
 
 const SEED_ADVICES: AdviceRow[] = [
@@ -327,10 +358,18 @@ export async function importSnapshot(payload: BackupPayload): Promise<void> {
       db.advices.clear()
     ])
     const rev = <T>(row: T): T & Revisioned => ({ ...row, revision: ROW_REVISION })
+    // 兼容旧存档：缺少作废字段的测次按「未作废」补齐，保证有效测次口径一致
+    const normalizeSurvey = (row: SurveySnapshot): Survey & Revisioned => ({
+      voided: false,
+      voidReason: '',
+      voidedAt: null,
+      ...row,
+      revision: ROW_REVISION
+    })
     await db.sections.bulkPut((payload.sections ?? []).map(rev))
     await db.rings.bulkPut((payload.rings ?? []).map(rev))
     await db.cracks.bulkPut((payload.cracks ?? []).map(rev))
-    await db.surveys.bulkPut((payload.surveys ?? []).map(rev))
+    await db.surveys.bulkPut((payload.surveys ?? []).map(normalizeSurvey))
     await db.advices.bulkPut((payload.advices ?? []).map(rev))
   })
 }
